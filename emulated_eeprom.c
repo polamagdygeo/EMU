@@ -62,7 +62,7 @@ static tSector_RuntimeInfo sectors_runtime_info_arr[SECTORS_NO] = {[0] = {0,UINT
 static uint32_t Emulated_EEPROM_GetPagesFirstEmptyLocAddr(uint8_t sector_no,uint8_t page_no);
 static uint8_t Emulated_EEPROM_CopyDataToNextPage(uint8_t sector_no,uint8_t page_no,tDataEntry *p_entry);
 static uint8_t Emulated_EEPROM_SwapToNextPage(uint8_t sector_no,uint8_t curr_page_no,tDataEntry *p_entry);
-static tDataEntry Emulated_EEPROM_GetLatestEntryForLogicalAddr(uint32_t logical_addr);
+static int8_t Emulated_EEPROM_GetLatestEntryForLogicalAddr(uint32_t logical_addr,tDataEntry *p_latest_entry);
 static tPageHeader Emulated_EEPROM_GetPageHeader(uint8_t sector_no,uint8_t page_no);
 static uint8_t Emulated_EEPROM_SetPageHeader(uint8_t sector_no,uint8_t page_no,tPageHeader header);
 static uint8_t Emulated_EEPROM_InitSector(uint8_t sector_no);
@@ -82,14 +82,13 @@ static uint32_t Emulated_EEPROM_GetPagesFirstEmptyLocAddr(uint8_t sector_no,uint
 	{
 		if(data_entry_base_ptr->logical_addr == UINT16_MAX)
 		{
-			ret = (uint32_t)data_entry_base_ptr;
 			break;
 		}
-		else
-		{
-			data_entry_base_ptr++;
-		}
+
+		data_entry_base_ptr++;
 	}
+
+	ret = (uint32_t)data_entry_base_ptr;
 
 	return ret;
 }
@@ -152,6 +151,7 @@ static uint8_t Emulated_EEPROM_CopyDataToNextPage(uint8_t sector_no,uint8_t page
 
 	flashing_addr_ptr = (tDataEntry*)(GET_SECTORS_PAGE_BASE_ADDR(sector_no,next_page_no));
 
+	/*if header is not empty or the constructed page is different than the new page content*/
 	if(((tPageHeader*)flashing_addr_ptr)->value != UINT32_MAX ||
 			(memcmp(((tPage*)flashing_addr_ptr)->data_entries_arr,temp_page.data_entries_arr,sizeof(tDataEntry) * PAGE_DATA_ENTRIES_MAX_NO)))
 	{
@@ -181,15 +181,14 @@ static uint8_t Emulated_EEPROM_CopyDataToNextPage(uint8_t sector_no,uint8_t page
 			}
 			Flash_Lock();
 
-			if(ret == 1)
-			{
-				sectors_runtime_info_arr[sector_no].first_empty_loc_addr = (uint32_t)flashing_addr_ptr;
-			}
+			sectors_runtime_info_arr[sector_no].first_empty_loc_addr = (uint32_t)flashing_addr_ptr;
 		}
 	}
-	else	/*Handling the case where data was swapped then power goes off*/
+	else/*Handling the case where data was swapped and power goes off before header was written then same data was written again*/
 	{
 		ret = 1;
+
+		sectors_runtime_info_arr[sector_no].first_empty_loc_addr = Emulated_EEPROM_GetPagesFirstEmptyLocAddr(sector_no,next_page_no);
 	}
 
 	return ret;
@@ -241,27 +240,32 @@ static uint8_t Emulated_EEPROM_SwapToNextPage(uint8_t sector_no,uint8_t curr_pag
     *@param void
     *@retval void
 */
-static tDataEntry Emulated_EEPROM_GetLatestEntryForLogicalAddr(uint32_t logical_addr)
+static int8_t Emulated_EEPROM_GetLatestEntryForLogicalAddr(uint32_t logical_addr,tDataEntry *p_latest_entry)
 {
-	tDataEntry ret = {0xFFFF,0xFFFF};
+	int8_t ret = -1; /*init with default fault value*/
 	uint8_t sector_no = IDENTIFY_LOGIC_ADDR_SECTOR(logical_addr);
 	uint8_t page_no = sectors_runtime_info_arr[sector_no].active_page_no;
 
-	if(sectors_runtime_info_arr[sector_no].first_empty_loc_addr &&
-			(page_no < FLASH_PAGES_PER_SECTOR))
+	if(page_no < FLASH_PAGES_PER_SECTOR)
 	{
-		tDataEntry *p_entry = (tDataEntry*)(sectors_runtime_info_arr[sector_no].first_empty_loc_addr - sizeof(tDataEntry));
-
-		while((uint32_t)p_entry >= (uint32_t)(((tPage*)GET_SECTORS_PAGE_BASE_ADDR(sector_no,page_no))->data_entries_arr))
+		if(sectors_runtime_info_arr[sector_no].first_empty_loc_addr >= sizeof(tDataEntry))
 		{
-			if(p_entry->logical_addr == logical_addr)
-			{
-				ret.logical_addr = logical_addr;
-				ret.data = p_entry->data;
-				break;
-			}
+			ret = 0; /*no fault not found*/
 
-			p_entry--;
+			tDataEntry *p_entry = (tDataEntry*)(sectors_runtime_info_arr[sector_no].first_empty_loc_addr - sizeof(tDataEntry));
+
+			while((uint32_t)p_entry >= (uint32_t)(((tPage*)GET_SECTORS_PAGE_BASE_ADDR(sector_no,page_no))->data_entries_arr))
+			{
+				if(p_entry->logical_addr == logical_addr)
+				{
+					ret = 1; /*found*/
+					p_latest_entry->logical_addr = logical_addr;
+					p_latest_entry->data = p_entry->data;
+					break;
+				}
+
+				p_entry--;
+			}
 		}
 	}
 
@@ -370,12 +374,17 @@ void Emulated_EEPROM_init(void)
 			{
 				/*do nothing*/
 			}
+			else /*Any other header value*/
+			{
+				/*Do nothing as swap function make sure that page is clean before writing it*/
+			}
 		}
 
 		if(was_active_page_found == 1)
 		{
 			/*Get run-time info per sector*/
 			sectors_runtime_info_arr[sectors_itr].active_page_no = active_page_no;
+			sectors_runtime_info_arr[sectors_itr].first_empty_loc_addr = Emulated_EEPROM_GetPagesFirstEmptyLocAddr(sectors_itr,active_page_no);
 		}
 		else	/*if no active page found in this sector*/
 		{
@@ -385,27 +394,31 @@ void Emulated_EEPROM_init(void)
 			if(ret)
 			{
 				sectors_runtime_info_arr[sectors_itr].active_page_no = 0; /*set first page in the sector as the active page*/
+				sectors_runtime_info_arr[sectors_itr].first_empty_loc_addr = Emulated_EEPROM_GetPagesFirstEmptyLocAddr(sectors_itr,active_page_no);
 			}
 		}
-
-		sectors_runtime_info_arr[sectors_itr].first_empty_loc_addr = Emulated_EEPROM_GetPagesFirstEmptyLocAddr(sectors_itr,active_page_no);
 	}
 }
 
 /**
     *@brief
     *@param void
-    *@retval void
+    *@retval -1 fault
+    *@retval 0 empty location
+    *@retval 1 found
 */
-uint8_t Emulated_EEPROM_ReadHalfWord(const uint32_t logical_addr,uint16_t *const p_half_word)
+int8_t Emulated_EEPROM_ReadHalfWord(const uint32_t logical_addr,uint16_t *const p_half_word)
 {
-	uint8_t ret = 0;
-	tDataEntry latest_entry = Emulated_EEPROM_GetLatestEntryForLogicalAddr(logical_addr);
+	tDataEntry latest_entry = {0xFFFF,0xFFFF}; /*defaults for empty location*/
+	int8_t ret = Emulated_EEPROM_GetLatestEntryForLogicalAddr(logical_addr,&latest_entry);
 
-	if(latest_entry.logical_addr == logical_addr)
+	if(ret == -1) /*fault*/
+	{
+		Emulated_EEPROM_init();
+	}
+	else
 	{
 		*p_half_word = latest_entry.data;
-		ret = 1;
 	}
 
 	return ret;
@@ -421,26 +434,48 @@ uint8_t Emulated_EEPROM_WriteHalfWord(const uint32_t logical_addr,const uint16_t
 	tDataEntry entry = {.logical_addr = logical_addr ,.data = half_word};
 	uint8_t sector_no = IDENTIFY_LOGIC_ADDR_SECTOR(logical_addr);
 	uint8_t page_no = sectors_runtime_info_arr[sector_no].active_page_no;
+	uint8_t has_fault = 0;
+	uint16_t old_half_word;
 
-	if(page_no < FLASH_PAGES_PER_SECTOR)
+	/*empty or found but different*/
+	if((Emulated_EEPROM_ReadHalfWord(logical_addr,&old_half_word) != -1) &&
+			old_half_word != half_word)
 	{
-		tDataEntry *first_empty_loc_ptr = (tDataEntry *)sectors_runtime_info_arr[sector_no].first_empty_loc_addr;
-
-		if(!first_empty_loc_ptr ||
-				((uint32_t)first_empty_loc_ptr - GET_SECTORS_PAGE_BASE_ADDR(sector_no,page_no)) >= FLASH_PAGE_SIZE) /*within page range*/
+		if(page_no < FLASH_PAGES_PER_SECTOR)
 		{
-			ret = Emulated_EEPROM_SwapToNextPage(sector_no,page_no,&entry);
+			tDataEntry *first_empty_loc_ptr = (tDataEntry *)sectors_runtime_info_arr[sector_no].first_empty_loc_addr;
+
+			if((uint32_t)first_empty_loc_ptr > GET_SECTORS_PAGE_BASE_ADDR(sector_no,page_no))
+			{
+				if(((uint32_t)first_empty_loc_ptr - GET_SECTORS_PAGE_BASE_ADDR(sector_no,page_no)) >= FLASH_PAGE_SIZE) /*within page range*/
+				{
+					ret = Emulated_EEPROM_SwapToNextPage(sector_no,page_no,&entry);
+				}
+				else
+				{
+					Flash_Unlock();
+					ret = Flash_Program((uint32_t)first_empty_loc_ptr,*((uint64_t*)&entry),2);
+					Flash_Lock();
+
+					if(ret == 1)
+					{
+						sectors_runtime_info_arr[sector_no].first_empty_loc_addr += sizeof(tDataEntry);
+					}
+				}
+			}
+			else
+			{
+				has_fault = 1;
+			}
 		}
 		else
 		{
-			Flash_Unlock();
-			ret = Flash_Program((uint32_t)first_empty_loc_ptr,*((uint64_t*)&entry),2);
-			Flash_Lock();
+			has_fault = 1;
+		}
 
-			if(ret == 1)
-			{
-				sectors_runtime_info_arr[sector_no].first_empty_loc_addr += sizeof(tDataEntry);
-			}
+		if(has_fault)
+		{
+			Emulated_EEPROM_init();
 		}
 	}
 
