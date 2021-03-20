@@ -11,9 +11,9 @@
 
 /* Private macro -------------------------------------------------------------*/
 #define FLASH_END_ADDR										0x8020000
-#define SECTORS_NO											1u
-#define FLASH_PAGES_PER_SECTOR								6u
-#define FLASH_EMU_EE_START									(FLASH_END_ADDR - (SECTORS_NO * FLASH_PAGES_PER_SECTOR * FLASH_PAGE_SIZE))
+#define EMU_SECTORS_NO										1u
+#define FLASH_PAGES_PER_EMU_SECTOR							6u
+#define EMU_FLASH_START_ADDR								(FLASH_END_ADDR - (EMU_SECTORS_NO * FLASH_PAGES_PER_EMU_SECTOR * FLASH_PAGE_SIZE))
 
 typedef enum{
 	PAGE_STATUS_ACTIVE,
@@ -33,8 +33,8 @@ typedef struct{
 	uint16_t data;
 }tDataEntry;
 
-#define PAGE_DATA_BYTE_SIZE									(FLASH_PAGE_SIZE - sizeof(tPageHeader))
-#define PAGE_DATA_ENTRIES_MAX_NO							(PAGE_DATA_BYTE_SIZE / sizeof(tDataEntry))
+#define PAGE_AVAILABLE_DATA_BYTES							(FLASH_PAGE_SIZE - sizeof(tPageHeader))
+#define PAGE_DATA_ENTRIES_MAX_NO							(PAGE_AVAILABLE_DATA_BYTES / sizeof(tDataEntry))
 #define MAX_LOGICAL_ADDR_PER_PAGE							PAGE_DATA_ENTRIES_MAX_NO
 
 typedef struct{
@@ -42,18 +42,18 @@ typedef struct{
 	tDataEntry data_entries_arr[PAGE_DATA_ENTRIES_MAX_NO];
 }__packed tPage;
 
-#define IDENTIFY_LOGIC_ADDR_SECTOR(LOGICAL_ADDR)			((LOGICAL_ADDR) / MAX_LOGICAL_ADDR_PER_PAGE)
-#define GET_SECTOR_BASE_ADDR(SECTOR_NO)						((FLASH_EMU_EE_START) + (sizeof(tPage) * FLASH_PAGES_PER_SECTOR * SECTOR_NO))
-#define GET_SECTORS_PAGE_BASE_ADDR(SECTOR_NO,PAGE_NO)		((FLASH_EMU_EE_START) + (sizeof(tPage) * FLASH_PAGES_PER_SECTOR * SECTOR_NO) + (PAGE_NO * FLASH_PAGE_SIZE))
-#define GET_NEXT_PAGE_NO(PAGE_NO)							(((PAGE_NO) + 1u) % FLASH_PAGES_PER_SECTOR)
+#define GET_SECTOR_OF_LOGIC_ADDR(LOGICAL_ADDR)				((LOGICAL_ADDR) / MAX_LOGICAL_ADDR_PER_PAGE)
+#define GET_SECTOR_BASE_ADDR(SECTOR_NO)						((EMU_FLASH_START_ADDR) + (sizeof(tPage) * FLASH_PAGES_PER_EMU_SECTOR * SECTOR_NO))
+#define GET_SECTORS_PAGE_BASE_ADDR(SECTOR_NO,PAGE_NO)		((EMU_FLASH_START_ADDR) + (sizeof(tPage) * FLASH_PAGES_PER_EMU_SECTOR * SECTOR_NO) + (PAGE_NO * FLASH_PAGE_SIZE))
+#define GET_NEXT_PAGE_NO(PAGE_NO)							(((PAGE_NO) + 1u) % FLASH_PAGES_PER_EMU_SECTOR)
 
 typedef struct{
 	uint32_t first_empty_loc_addr;
 	uint8_t active_page_no;
-}tSector_RuntimeInfo;
+}tSector_RuntimeContext;
 
 /* Private variables ---------------------------------------------------------*/
-static tSector_RuntimeInfo sectors_runtime_info_arr[SECTORS_NO] = {[0] = {0,UINT8_MAX}};
+static tSector_RuntimeContext sectors_runtime_info_arr[EMU_SECTORS_NO] = {[0] = {0,UINT8_MAX}};
 
 /* Private function prototypes -----------------------------------------------*/
 /*** @defgroup
@@ -68,7 +68,7 @@ static uint8_t Emulated_EEPROM_SetPageHeader(uint8_t sector_no,uint8_t page_no,t
 static uint8_t Emulated_EEPROM_InitSector(uint8_t sector_no);
 
 /**
-    *@brief	used @ init getting sectors run time info
+    *@brief	used @ init getting sectors run time context
     *@param void
     *@retval void
 */
@@ -243,10 +243,10 @@ static uint8_t Emulated_EEPROM_SwapToNextPage(uint8_t sector_no,uint8_t curr_pag
 static int8_t Emulated_EEPROM_GetLatestEntryForLogicalAddr(uint32_t logical_addr,tDataEntry *p_latest_entry)
 {
 	int8_t ret = -1; /*init with default fault value*/
-	uint8_t sector_no = IDENTIFY_LOGIC_ADDR_SECTOR(logical_addr);
+	uint8_t sector_no = GET_SECTOR_OF_LOGIC_ADDR(logical_addr);
 	uint8_t page_no = sectors_runtime_info_arr[sector_no].active_page_no;
 
-	if(page_no < FLASH_PAGES_PER_SECTOR)
+	if(page_no < FLASH_PAGES_PER_EMU_SECTOR)
 	{
 		if(sectors_runtime_info_arr[sector_no].first_empty_loc_addr >= sizeof(tDataEntry))
 		{
@@ -311,7 +311,7 @@ static uint8_t Emulated_EEPROM_InitSector(uint8_t sector_no)
 	uint8_t ret = 0;
 	tPageHeader init_page_header;
 
-	ret = Flash_Erase(GET_SECTORS_PAGE_BASE_ADDR(sector_no,0),FLASH_PAGES_PER_SECTOR);
+	ret = Flash_Erase(GET_SECTORS_PAGE_BASE_ADDR(sector_no,0),FLASH_PAGES_PER_EMU_SECTOR);
 
 	if(ret)
 	{
@@ -332,13 +332,13 @@ void Emulated_EEPROM_init(void)
 	uint8_t ret = 0;
 	uint8_t sectors_itr = 0;
 
-	for(sectors_itr = 0 ; sectors_itr < SECTORS_NO ; sectors_itr++)
+	for(sectors_itr = 0 ; sectors_itr < EMU_SECTORS_NO ; sectors_itr++)
 	{
 		uint8_t page_itr;
 		uint8_t active_page_no = 0;
 		uint8_t was_active_page_found = 0;
 
-		for(page_itr = 0 ; page_itr < FLASH_PAGES_PER_SECTOR; page_itr++)
+		for(page_itr = 0 ; page_itr < FLASH_PAGES_PER_EMU_SECTOR; page_itr++)
 		{
 			tPageHeader curr_page_header = Emulated_EEPROM_GetPageHeader(sectors_itr,page_itr);
 
@@ -349,7 +349,7 @@ void Emulated_EEPROM_init(void)
 				{
 					/*if wrapped around*/
 					if(active_page_no == 0 &&
-							(page_itr == (FLASH_PAGES_PER_SECTOR - 1)))
+							(page_itr == (FLASH_PAGES_PER_EMU_SECTOR - 1)))
 					{
 						ret = Flash_Erase(GET_SECTORS_PAGE_BASE_ADDR(sectors_itr,page_itr),1);
 					}
@@ -432,7 +432,7 @@ uint8_t Emulated_EEPROM_WriteHalfWord(const uint32_t logical_addr,const uint16_t
 {
 	uint8_t ret = 0;
 	tDataEntry entry = {.logical_addr = logical_addr ,.data = half_word};
-	uint8_t sector_no = IDENTIFY_LOGIC_ADDR_SECTOR(logical_addr);
+	uint8_t sector_no = GET_SECTOR_OF_LOGIC_ADDR(logical_addr);
 	uint8_t page_no = sectors_runtime_info_arr[sector_no].active_page_no;
 	uint8_t has_fault = 0;
 	uint16_t old_half_word;
@@ -441,7 +441,7 @@ uint8_t Emulated_EEPROM_WriteHalfWord(const uint32_t logical_addr,const uint16_t
 	if((Emulated_EEPROM_ReadHalfWord(logical_addr,&old_half_word) != -1) &&
 			old_half_word != half_word)
 	{
-		if(page_no < FLASH_PAGES_PER_SECTOR)
+		if(page_no < FLASH_PAGES_PER_EMU_SECTOR)
 		{
 			tDataEntry *first_empty_loc_ptr = (tDataEntry *)sectors_runtime_info_arr[sector_no].first_empty_loc_addr;
 
